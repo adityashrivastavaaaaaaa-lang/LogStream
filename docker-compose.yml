@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  # 1. Zookeeper (Kafka Dependency)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  # 2. Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CREATE_TOPICS: "log_topic:1:1" # Auto-creates 'log_topic'
+
+  # 3. PostgreSQL Database
+  db:
+    image: postgres:15
+    container_name: logstream_db
+    environment:
+      POSTGRES_USER: loguser
+      POSTGRES_PASSWORD: logpassword
+      POSTGRES_DB: logdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loguser -d logdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 4. FastAPI Ingestor & Query API
+  api:
+    build: ./api
+    container_name: logstream_api
+    depends_on:
+      - kafka
+      - db
+    ports:
+      - "8000:8000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: log_topic
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: logdb
+      DB_USER: loguser
+      DB_PASSWORD: logpassword
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # 5. Kafka Consumer Worker
+  worker:
+    build: ./worker
+    container_name: logstream_worker
+    depends_on:
+      kafka:
+        condition: service_started
+      db:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: log_topic
+      KAFKA_GROUP_ID: log_consumer_group
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: logdb
+      DB_USER: loguser
+      DB_PASSWORD: logpassword
+    command: python worker.py
+
+  # 6. Frontend Web UI
+  frontend:
+    build: ./frontend
+    container_name: logstream_frontend
+    ports:
+      - "8080:80"
+
+volumes:
+  postgres_data:
